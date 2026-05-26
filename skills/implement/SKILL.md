@@ -11,44 +11,64 @@ The skill has five phases: **prepare**, **discover patterns and order** (via sub
 
 The skill does not assume what kind of repo it's working on. The build order, the conventions, and the common-miss checks all come from the plan and the repo, not from this skill.
 
+---
+
 ## Phase 1 — Prepare
 
 If the user has not pointed at a plan, ask for one. Accept a path or pasted content.
 
+**If no local repository is accessible, stop immediately** and ask the user to provide repo access before proceeding. Do not begin the build phase against a hypothetical file structure — fabricated paths produce fabricated implementations.
+
 Before writing any code:
 
-1. **Confirm the plan was reviewed.** If the user hasn't run `review-plan` (or hasn't otherwise approved it), ask whether they want to review first. A bad plan executed precisely is still a bad outcome. If the user wants to proceed without review, fine — but note it in the final report.
-2. **Confirm the branch.** Check `git branch --show-current`. If it doesn't match the plan's proposed branch (or any other approved branch name), create and check out the right one. If the plan didn't specify a branch convention, ask the user once and proceed.
-3. **Confirm a clean working tree.** Run `git status`. If there are uncommitted changes that aren't part of this work, surface them — don't silently mix them into this implementation.
+1. **Confirm the plan was reviewed.** If the user hasn't run `review-plan` (or hasn't otherwise approved it), ask whether they want to review first. A bad plan executed precisely is still a bad outcome. If the user wants to proceed without review, fine — but flag it in the **Warnings** field of the final report.
+
+2. **Confirm the branch.** Run `git branch --show-current`.
+   - If the current branch already looks like a valid feature branch (not `main`, `master`, `trunk`, `staging` or `develop`), confirm with the user whether to use it before creating a new one — don't silently create a duplicate.
+   - If it doesn't match the plan's proposed branch, create and check out the right one.
+   - If the plan didn't specify a branch convention, ask the user once and proceed.
+
+3. **Confirm a clean working tree.** Run `git status`. If there are uncommitted changes that aren't part of this work, surface them — don't silently mix them into this implementation. Flag any unresolved dirty-tree situation in the final report's **Warnings** field.
+
 4. **Read the plan into the main thread's context.** You'll need it throughout the build phase.
+
+---
 
 ## Phase 2 — Discover patterns and dependency order (delegate to a subagent)
 
 Spawn a **pattern-and-order subagent** via the Task tool. Its job is twofold: find existing patterns to mirror, AND tell the main thread what order to build things in.
 
-For plans that touch very distinct areas (e.g., infra + application code), spawn one subagent per area in parallel — cap ~4.
+For plans that touch very distinct areas (e.g., infra + application code), spawn one subagent per area in parallel. In practice, beyond ~4 agents the synthesis overhead tends to outweigh the parallelism benefit — use judgment rather than always hitting that number.
 
 Don't read repo files in the main thread. Same reasoning as the other skills.
 
 ### Subagent prompt template
 
 ```
-You are scouting a codebase for an upcoming implementation. Your job is to find patterns to mirror AND determine the order things should be built in. You are NOT writing the implementation.
+You are scouting a codebase for an upcoming implementation. Your job is to find
+patterns to mirror AND determine the order things should be built in.
+You are NOT writing the implementation.
 
 PLAN:
 <paste the plan>
 
 YOUR FOCUS:
-<the area, e.g., "everything in this plan", or "the infra/Terraform portion", or "the backend portion">
+<the area, e.g., "everything in this plan", or "the infra/Terraform portion",
+or "the backend portion">
 
 YOUR JOB:
 
 A. Identify the kind of repo and stack
-   - Application (web backend, web frontend, mobile, desktop, CLI), library, infrastructure-as-code, scripts, documentation, monorepo with several of these — say which.
-   - Languages, frameworks, build tools, test frameworks, package managers visible from config files.
+   - Application (web backend, web frontend, mobile, desktop, CLI), library,
+     infrastructure-as-code, scripts, documentation, monorepo with several of
+     these — say which.
+   - Languages, frameworks, build tools, test frameworks, package managers
+     visible from config files.
 
-B. For each kind of change the plan calls for, find the closest existing example in the repo and report the pattern.
-   Use grep/find/glob to locate candidates, then read them. Cover only what the plan actually touches. Examples of "kinds of change" — adapt to what's actually in the plan:
+B. For each kind of change the plan calls for, find the closest existing example
+   in the repo and report the pattern. Use grep/find/glob to locate candidates,
+   then read them. Cover only what the plan actually touches. Examples of "kinds
+   of change" — adapt to what's actually in the plan:
 
      - Adding a new module/package/file of type X
      - Adding a new function/endpoint/handler/command
@@ -56,7 +76,8 @@ B. For each kind of change the plan calls for, find the closest existing example
      - Adding a new config value or environment variable
      - Adding a new schema change (if a database/schema exists)
      - Adding a new external integration
-     - Adding new infrastructure (Terraform module, K8s manifest, GitHub Action, Dockerfile change)
+     - Adding new infrastructure (Terraform module, K8s manifest, GitHub Action,
+       Dockerfile change)
      - Adding new documentation
      - Anything else the plan specifically calls for
 
@@ -64,34 +85,46 @@ B. For each kind of change the plan calls for, find the closest existing example
      PATTERN: <short name>
      Example: <path:line>
      Convention: <how it's done in this repo, in 1-3 sentences>
-     Gotchas: <anything non-obvious — exceptions, dual conventions in the codebase, deprecated paths>
+     Gotchas: <anything non-obvious — exceptions, dual conventions in the
+               codebase, deprecated paths>
 
 C. Determine the dependency order for THIS plan.
-   Look at what the plan calls for and decide the order in which the work should be done so that each step's dependencies already exist when it begins. Do NOT use a fixed template. Derive the order from the actual work.
+   Look at what the plan calls for and decide the order in which the work should
+   be done so that each step's dependencies already exist when it begins.
+   Do NOT use a fixed template. Derive the order from the actual work.
 
    Examples of how dependency order varies by repo type:
-     - Application repo with DB: schema migrations → shared types → data layer → business logic → API/routes → frontend client → frontend UI → tests → config docs
+     - Application repo with DB: schema migrations → shared types → data layer
+       → business logic → API/routes → frontend client → frontend UI → tests
+       → config docs
      - Pure library: public API/types → internal modules → tests → docs/examples
-     - Terraform module: variables → resources in dependency order (providers → IAM → networks → compute → DNS) → outputs → README
+     - Terraform module: variables → resources in dependency order (providers →
+       IAM → networks → compute → DNS) → outputs → README
      - CLI tool: argument parsing → command handlers → output formatting → tests
      - Documentation change: outline/structure → sections → cross-links → examples
-     - Static site: content → templates that reference content → styles → build config
+     - Static site: content → templates that reference content → styles →
+       build config
 
-   Pick the order that fits THIS plan and THIS repo. Skip steps the plan doesn't call for. Add steps the plan does call for that aren't on any of the templates above.
+   Pick the order that fits THIS plan and THIS repo. Skip steps the plan doesn't
+   call for. Add steps the plan does call for that aren't on any template above.
 
 D. Note any non-obvious operational facts the implementer needs:
    - Formatter/linter command, if one exists.
    - How to run the test suite locally.
-   - How to run/build/exercise the thing being changed (start command, deploy preview, repl, etc.).
+   - How to run/build/exercise the thing being changed (start command, deploy
+     preview, repl, etc.).
    - Where new env vars or config values get documented.
-   - Branch and commit conventions visible from `git log --oneline -30` and `git branch -a`.
+   - Branch and commit conventions visible from `git log --oneline -30` and
+     `git branch -a`.
 
-REPORT BACK with sections A, B, C, D in that order. Cite real paths only. Keep under ~700 words.
-
+REPORT BACK with sections A, B, C, D in that order.
+Cite real paths only. Keep under ~700 words.
 DO NOT write the implementation. DO NOT propose code. Just report.
 ```
 
 The main thread keeps this report and refers back to it during the build phase. The order in section C is the order to follow.
+
+---
 
 ## Phase 3 — Build (main thread)
 
@@ -104,15 +137,23 @@ Implementation is interleaved work — each step depends on the previous one bei
 For each step in the order:
 
 1. Look up the relevant pattern from section B of the subagent report.
-2. Mirror that pattern. If the plan and the pattern conflict, stop and ask — the plan may have been written without seeing the pattern.
+2. Mirror that pattern. If the plan and the pattern conflict, surface the specific conflict to the user: state what the plan says, what the repo pattern shows, which you'd recommend following and why, and ask the user to decide. Don't silently pick one.
 3. After completing the step, do whatever local check makes sense (run the migration, run the test, type-check, build) before moving to the next step.
+4. **Commit the step** using the repo's commit convention from section D. Do not batch all changes into a single commit at the end — granular commits make the verification diff easier to read and make bisecting failures easier.
+
+### Secrets and config values
+
+When a step introduces a new secret, credential, or config value:
+- **Never commit it.** Add it to `.gitignore` or the equivalent if it would otherwise be tracked.
+- Document it per the convention surfaced in section D (e.g., `.env.example`, `config/README.md`, a secrets manager entry).
+- You will remind the user to update their local config and any production secret store in the Phase 5 report.
 
 ### Universal non-negotiables
 
 These apply regardless of repo type:
 
-- **Never commit secrets, credentials, or `.env` files.** New secrets/config values get documented per the convention from section D, and the user is reminded to update local config and any production secret store.
-- **Never push directly to the default branch** (`main`, `master`, `trunk`, `develop`, whatever the repo uses). PR only.
+- **Never commit secrets, credentials, or `.env` files.**
+- **Never push directly to the default branch** (`main`, `master`, `trunk`, `develop`, whatever the repo uses). When the implementation is complete and the user asks to push, push to the feature branch and remind them to open a PR.
 - **Never modify a file that's already been merged in a way that's normally append-only** (committed migrations, changelogs that follow keep-a-changelog, signed/published artifacts). If unsure, check the repo's conventions and ask.
 - **Never bypass auth, capability, or permission checks** that exist on similar paths. If unsure whether a new path should be protected, ask.
 - **Comment WHY, not WHAT.** Code should be self-explanatory about what it does. Comments are for non-obvious reasons, tradeoffs, or links to context.
@@ -123,18 +164,27 @@ These apply regardless of repo type:
 
 - **Pattern unclear** → spawn a follow-up pattern-discovery subagent with a narrower prompt. Don't read a pile of files in the main thread.
 - **Plan ambiguous** → stop and ask the user. Don't guess on ambiguity that would change the design.
-- **Repo convention conflicts with the plan** → stop and surface the conflict. The plan was probably written without seeing the relevant pattern, and the convention usually wins.
+- **Repo convention conflicts with the plan** → surface the conflict (what the plan says, what the repo pattern shows, your recommendation), then ask the user to decide. The convention usually wins.
 - **Subagent's order doesn't quite fit** → stop and ask, or spawn a follow-up subagent to refine the order. Don't silently reorder.
+
+---
 
 ## Phase 4 — Verify (delegate to a subagent)
 
-After the build phase, before declaring done, spawn a **verification subagent** with fresh eyes on the diff. The main thread has been deep in the implementation; a fresh subagent will catch things you stopped seeing.
+After the build phase, before declaring done, capture the full diff and spawn a **verification subagent** with fresh eyes on it. The main thread has been deep in the implementation; a fresh subagent will catch things you stopped seeing.
+
+**Before spawning the verifier**, run the following in the main thread and include both outputs in the verifier prompt:
+```
+git diff <base-branch>...HEAD
+git status
+```
+The `git status` output captures untracked files the diff won't show.
 
 ### Verification prompt template
 
 ```
-You are reviewing a freshly-written implementation against the plan it was supposed to follow.
-Your job is to verify, NOT to refactor or rewrite.
+You are reviewing a freshly-written implementation against the plan it was
+supposed to follow. Your job is to verify, NOT to refactor or rewrite.
 
 PLAN:
 <paste the plan>
@@ -143,26 +193,41 @@ PATTERNS REPORT (from the earlier pattern-discovery subagent):
 <paste section B from the earlier report>
 
 DIFF:
-<paste output of `git diff <base-branch>...HEAD` plus untracked files>
+<paste output of `git diff <base-branch>...HEAD`>
+
+UNTRACKED FILES:
+<paste output of `git status` — new files not yet in git diff>
 
 YOUR JOB:
 
-1. For each item the plan said would change: confirm it actually changed in the diff.
-2. For each item the diff changed: confirm the plan said it would (or that the change is a reasonable side-effect).
-3. For each pattern in the patterns report: spot-check that the diff follows it where applicable.
-4. Derive a common-miss checklist FROM what this diff actually does. Do NOT use a generic checklist.
-   For each kind of change present in the diff, ask: what's the most common way for this kind of change to be incomplete? Then check the diff for that. Examples:
-     - If the diff adds a new module/file → is it imported/registered/exported anywhere it needs to be?
-     - If the diff adds a new config value → is it documented? Is it actually read by the code that needs it?
-     - If the diff adds a new external dependency → is it in the manifest (package.json, Cargo.toml, etc.) and lockfile?
-     - If the diff adds a new schema/migration → is the migration reflected in the code that uses the new schema, and vice versa?
-     - If the diff adds a new endpoint/handler/command → is it wired into the entry point that exposes it?
-     - If the diff adds a new test → does it actually run with the rest of the suite?
-     - If the diff adds new infrastructure → are outputs/variables wired to whatever consumes them?
+1. For each item the plan said would change: confirm it actually changed in
+   the diff.
+2. For each item the diff changed: confirm the plan said it would (or that the
+   change is a reasonable side-effect).
+3. For each pattern in the patterns report: spot-check that the diff follows it
+   where applicable.
+4. Derive a common-miss checklist FROM what this diff actually does.
+   Do NOT use a generic checklist. For each kind of change present in the diff,
+   ask: what's the most common way for this kind of change to be incomplete?
+   Then check the diff for that. Examples:
+     - If the diff adds a new module/file → is it imported/registered/exported
+       anywhere it needs to be?
+     - If the diff adds a new config value → is it documented? Is it actually
+       read by the code that needs it?
+     - If the diff adds a new external dependency → is it in the manifest
+       (package.json, Cargo.toml, etc.) and lockfile?
+     - If the diff adds a new schema/migration → is the migration reflected in
+       the code that uses the new schema, and vice versa?
+     - If the diff adds a new endpoint/handler/command → is it wired into the
+       entry point that exposes it?
+     - If the diff adds a new test → does it actually run with the rest of the
+       suite?
+     - If the diff adds new infrastructure → are outputs/variables wired to
+       whatever consumes them?
    Skip kinds of change the diff doesn't contain.
 
 5. General hygiene checks (apply to any diff):
-   - Debug output left in (console.log, print, dbg!, fmt.Println for debug, eprintln! for debug, etc.).
+   - Debug output left in (console.log, print, dbg!, fmt.Println for debug, etc.)
    - TODO/FIXME/XXX markers added in this diff.
    - Commented-out code added in this diff.
    - Strings that look like secrets/keys/tokens/passwords.
@@ -171,31 +236,42 @@ YOUR JOB:
 REPORT BACK with:
 - **Plan items completed**: list with diff line references.
 - **Plan items missing**: anything the plan called for that's not in the diff.
-- **Diff items not in plan**: anything in the diff the plan didn't mention (could be fine, could be scope creep).
+- **Diff items not in plan**: anything in the diff the plan didn't mention
+  (could be fine, could be scope creep).
 - **Pattern conformance**: for each pattern checked, whether the diff follows it.
-- **Derived common-miss findings**: results of step 4, item by item, with `path:line`.
+- **Derived common-miss findings**: results of step 4, item by item, with
+  `path:line`.
 - **General hygiene findings**: results of step 5, only items that fired.
 
-DO NOT propose refactors. DO NOT critique style unless it violates a convention surfaced earlier. Just verify.
+DO NOT propose refactors. DO NOT critique style unless it violates a convention
+surfaced earlier. Just verify.
 
 Cite real paths only. Keep under ~600 words.
 ```
 
-If the verifier flags missing items, fix them in the main thread, then either re-spawn the verifier or note the fix in the final report.
+### After the verifier returns
+
+- **Trivial fixes** (a missing import, a single-line config addition, a typo) — fix in the main thread and note the fix in the Phase 5 report. No need to re-spawn.
+- **Non-trivial fixes** (touches more than one file or adds new logic) — fix in the main thread, then re-spawn the verifier with an updated diff so the fix itself gets checked.
+
+Do not declare the implementation done until Phase 4 has run and any blocking issues from it are resolved.
+
+---
 
 ## Phase 5 — Report
 
 Produce a concise end-of-task summary:
 
+- **Warnings** — flags raised during Phase 1: plan was not reviewed before implementation, dirty working tree was present at start, branch mismatch was overridden, or any other pre-flight issue. Omit if none.
 - **Files changed** — list of paths, grouped (added / modified / deleted).
-- **Schema/migrations/infra changes** — whatever the plan called for that touches persistent or shared state, with one-line descriptions. Use whatever terms apply ("migrations", "Terraform resources", "schema", "manifests", "config").
-- **New config / env vars / secrets** — names, where they're documented, and a reminder to update local and production stores.
+- **Schema / migrations / infra changes** — whatever the plan called for that touches persistent or shared state, with one-line descriptions. Use whatever terms apply ("migrations", "Terraform resources", "schema", "manifests", "config").
+- **New config / env vars / secrets** — names, where they're documented, and a reminder to update local config and any production secret store before running or deploying.
 - **Manually verified** — what you actually ran, exercised, or tested.
 - **Not verified** — be explicit. If you didn't run something on real data, say so. If a test in the plan was deferred, say so.
 - **Verifier findings addressed** — list of issues the verification subagent surfaced and how each was resolved.
 - **Next steps for the user** — usually some combination of: run formatter, run full test suite, push branch, open PR, update production config, deploy.
 
-Do not declare the implementation done until Phase 4 has run and any blocking issues from it are resolved.
+---
 
 ## Rules
 
